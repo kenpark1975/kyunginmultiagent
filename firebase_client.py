@@ -12,6 +12,7 @@ def get_db():
 
     if not firebase_admin._apps:
         key = json.loads(st.secrets["FIREBASE_JSON"])
+        key["private_key"] = key["private_key"].replace("\\n", "\n")
         cred = credentials.Certificate(key)
         firebase_admin.initialize_app(cred)
 
