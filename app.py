@@ -143,7 +143,7 @@ for k, v in defaults.items():
 
 # ─── 사이드바 ─────────────────────────────────────────────
 with st.sidebar:
-    page = st.radio("", ["📝 새 분석", "📦 제품 관리", "📂 분석 기록"], label_visibility="collapsed")
+    page = st.radio("페이지 선택", ["📝 새 분석", "📦 제품 관리", "📂 분석 기록"], label_visibility="collapsed")
     st.markdown("---")
 
     if page == "📝 새 분석":
