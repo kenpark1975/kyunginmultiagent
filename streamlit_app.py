@@ -22,8 +22,7 @@ from products.product_manager import (
     add_performance_record, get_profile_summary, delete_product
 )
 
-HISTORY_DIR = os.path.join(BASE_DIR, "campaigns")
-os.makedirs(HISTORY_DIR, exist_ok=True)
+from firebase_client import get_db
 
 AGENT_MODULES = {
     "strategy_director": strategy_director,
@@ -64,6 +63,7 @@ if not ANTHROPIC_API_KEY or ANTHROPIC_API_KEY == "여기에_API_키_붙여넣기
 # ─── 히스토리 유틸 ────────────────────────────────────────
 def save_history(brief, category, budget_range, agent_opinions, debate_result, final_report, product_name=""):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    doc_id = ts
     record = {
         "date": datetime.now().isoformat(),
         "date_display": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -77,45 +77,40 @@ def save_history(brief, category, budget_range, agent_opinions, debate_result, f
         "final_report": final_report,
         "outcome": None,
         "learnings": "",
+        "_filename": doc_id,
     }
-    path = os.path.join(HISTORY_DIR, f"{ts}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(record, f, ensure_ascii=False, indent=2)
-    return path
+    try:
+        db = get_db()
+        db.collection("ad_campaigns").document(doc_id).set(record)
+    except Exception:
+        pass
+    return doc_id
 
 def load_history_list():
-    files = sorted([f for f in os.listdir(HISTORY_DIR) if f.endswith(".json")], reverse=True)
-    records = []
-    for fname in files:
-        try:
-            with open(os.path.join(HISTORY_DIR, fname), encoding="utf-8") as f:
-                data = json.load(f)
-                data["_filename"] = fname
-                records.append(data)
-        except Exception:
-            pass
-    return records
+    try:
+        db = get_db()
+        docs = db.collection("ad_campaigns").order_by("date", direction="DESCENDING").limit(50).stream()
+        return [d.to_dict() for d in docs]
+    except Exception:
+        return []
 
-def update_history_outcome(filename, outcome, learnings):
-    path = os.path.join(HISTORY_DIR, filename)
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    data["outcome"] = outcome
-    data["learnings"] = learnings
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def update_history_outcome(doc_id, outcome, learnings):
+    try:
+        db = get_db()
+        db.collection("ad_campaigns").document(doc_id).update({"outcome": outcome, "learnings": learnings})
+    except Exception:
+        pass
 
-def update_history_opinions(filename, agent_opinions, debate_result, final_report):
-    path = os.path.join(HISTORY_DIR, filename)
-    if not os.path.exists(path):
-        return
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    data["agent_opinions"] = agent_opinions
-    data["debate_result"] = debate_result
-    data["final_report"] = final_report
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def update_history_opinions(doc_id, agent_opinions, debate_result, final_report):
+    try:
+        db = get_db()
+        db.collection("ad_campaigns").document(doc_id).update({
+            "agent_opinions": agent_opinions,
+            "debate_result": debate_result,
+            "final_report": final_report,
+        })
+    except Exception:
+        pass
 
 def extract_summary(debate_result: str) -> str:
     """토론 결과에서 최종 합의 부분만 추출."""
@@ -348,10 +343,10 @@ if page == "📦 제품 관리":
 # ══════════════════════════════════════════════════════════
 elif page == "📂 분석 기록":
     if st.session_state.view_history:
-        path = os.path.join(HISTORY_DIR, st.session_state.view_history)
         try:
-            with open(path, encoding="utf-8") as f:
-                rec = json.load(f)
+            db = get_db()
+            doc = db.collection("ad_campaigns").document(st.session_state.view_history).get()
+            rec = doc.to_dict() if doc.exists else {}
 
             st.title("📂 분석 기록 상세보기")
             st.caption(f"분석일시: {rec.get('date_display','')} | 카테고리: {rec.get('category','')} | 예산: {rec.get('budget_range','')}")

@@ -1,0 +1,17 @@
+{
+  "agent_name": "data_analyst",
+  "created": "2026-04-09T13:24:27.159234",
+  "total_campaigns": 1,
+  "success_count": 1,
+  "experiences": [
+    {
+      "date": "2026-04-09",
+      "summary": "제품: 본앤메이드 브리즈케어 신발건조기\n목표: 온라인 구매 전환\n예산: 일 120~150만원\n기간: 이번주 (1주)\n\n최근 신발건조기 시장 침체로 전체적인 매출 볼륨이 줄어들어 자사몰, 네이버, 쿠팡 각각 효율 개선",
+      "category": "생활가전",
+      "budget_range": "1,000만원~3,000만원",
+      "channels": [],
+      "outcome": "성공",
+      "learnings": ""
+    }
+  ]
+}
