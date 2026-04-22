@@ -27,7 +27,9 @@ def get_product_list() -> list:
         db = _get_db()
         docs = db.collection("ad_products").stream()
         return sorted([d.to_dict().get("name", d.id) for d in docs])
-    except Exception:
+    except Exception as e:
+        import streamlit as st
+        st.error(f"제품 목록 오류: {e}")
         return []
 
 def load_product(product_name: str) -> dict:
