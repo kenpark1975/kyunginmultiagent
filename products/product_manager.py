@@ -38,8 +38,9 @@ def load_product(product_name: str) -> dict:
         doc = db.collection("ad_products").document(_safe_id(product_name)).get()
         if doc.exists:
             return doc.to_dict()
-    except Exception:
-        pass
+    except Exception as e:
+        import streamlit as st
+        st.warning(f"⚠️ 제품 로드 실패 ({product_name}): {e}")
     return _empty_profile(product_name)
 
 def save_product(profile: dict):
@@ -47,15 +48,18 @@ def save_product(profile: dict):
         db = _get_db()
         profile["updated"] = datetime.now().strftime("%Y-%m-%d")
         db.collection("ad_products").document(_safe_id(profile["name"])).set(profile)
-    except Exception:
-        pass
+    except Exception as e:
+        import streamlit as st
+        st.warning(f"⚠️ 제품 저장 실패 ({profile.get('name','')}): {e}")
 
 def delete_product(product_name: str) -> bool:
     try:
         db = _get_db()
         db.collection("ad_products").document(_safe_id(product_name)).delete()
         return True
-    except Exception:
+    except Exception as e:
+        import streamlit as st
+        st.warning(f"⚠️ 제품 삭제 실패 ({product_name}): {e}")
         return False
 
 def add_performance_record(product_name: str, record: dict):

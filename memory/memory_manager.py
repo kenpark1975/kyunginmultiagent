@@ -24,16 +24,18 @@ def load_memory(agent_name: str) -> dict:
         doc = db.collection("ad_agent_memories").document(agent_name).get()
         if doc.exists:
             return doc.to_dict()
-    except Exception:
-        pass
+    except Exception as e:
+        import streamlit as st
+        st.warning(f"⚠️ 메모리 로드 실패 ({agent_name}): {e}")
     return _empty_memory(agent_name)
 
 def save_memory(agent_name: str, memory: dict):
     try:
         db = _get_db()
         db.collection("ad_agent_memories").document(agent_name).set(memory)
-    except Exception:
-        pass
+    except Exception as e:
+        import streamlit as st
+        st.warning(f"⚠️ 메모리 저장 실패 ({agent_name}): {e}")
 
 def add_experience(agent_name: str, campaign_data: dict, outcome: str):
     memory = load_memory(agent_name)
