@@ -82,8 +82,8 @@ def save_history(brief, category, budget_range, agent_opinions, debate_result, f
     try:
         db = get_db()
         db.collection("ad_campaigns").document(doc_id).set(record)
-    except Exception:
-        pass
+    except Exception as e:
+        st.warning(f"⚠️ 분석 기록 저장 실패: {e}")
     return doc_id
 
 def load_history_list():
@@ -91,15 +91,16 @@ def load_history_list():
         db = get_db()
         docs = db.collection("ad_campaigns").order_by("date", direction="DESCENDING").limit(50).stream()
         return [d.to_dict() for d in docs]
-    except Exception:
+    except Exception as e:
+        st.warning(f"⚠️ 분석 기록 로드 실패: {e}")
         return []
 
 def update_history_outcome(doc_id, outcome, learnings):
     try:
         db = get_db()
         db.collection("ad_campaigns").document(doc_id).update({"outcome": outcome, "learnings": learnings})
-    except Exception:
-        pass
+    except Exception as e:
+        st.warning(f"⚠️ 피드백 저장 실패: {e}")
 
 def update_history_opinions(doc_id, agent_opinions, debate_result, final_report):
     try:
@@ -109,8 +110,8 @@ def update_history_opinions(doc_id, agent_opinions, debate_result, final_report)
             "debate_result": debate_result,
             "final_report": final_report,
         })
-    except Exception:
-        pass
+    except Exception as e:
+        st.warning(f"⚠️ 재분석 결과 업데이트 실패: {e}")
 
 def extract_summary(debate_result: str) -> str:
     """토론 결과에서 최종 합의 부분만 추출."""
