@@ -140,29 +140,6 @@ def extract_summary(debate_result: str) -> str:
             summary_lines.append(line)
     return "\n".join(summary_lines) if summary_lines else debate_result
 
-# ─── 기존 로컬 파일 → Firebase 마이그레이션 (최초 1회) ──────
-def _migrate_local_to_firebase():
-    db = _get_db()
-    if not db:
-        return
-    if not os.path.exists(HISTORY_DIR):
-        return
-    files = [f for f in os.listdir(HISTORY_DIR) if f.endswith(".json")]
-    for fname in files:
-        doc_id = fname.replace(".json", "")
-        try:
-            # 이미 Firebase에 있으면 스킵
-            if db.collection("ad_campaigns").document(doc_id).get().exists:
-                continue
-            with open(os.path.join(HISTORY_DIR, fname), encoding="utf-8") as f:
-                data = json.load(f)
-            db.collection("ad_campaigns").document(doc_id).set(data)
-        except Exception:
-            pass
-
-if "migrated" not in st.session_state:
-    _migrate_local_to_firebase()
-    st.session_state["migrated"] = True
 
 # ─── 세션 상태 초기화 ─────────────────────────────────────
 defaults = {
