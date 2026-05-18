@@ -22,8 +22,7 @@ from products.product_manager import (
     add_performance_record, get_profile_summary, delete_product
 )
 
-HISTORY_DIR = os.path.join(BASE_DIR, "campaigns")
-os.makedirs(HISTORY_DIR, exist_ok=True)
+# 로컬 파일 대신 Firebase 전용으로 저장 (Streamlit Cloud 파일시스템은 슬립 후 초기화됨)
 
 AGENT_MODULES = {
     "strategy_director": strategy_director,
@@ -61,7 +60,12 @@ if not ANTHROPIC_API_KEY or ANTHROPIC_API_KEY == "여기에_API_키_붙여넣기
     st.error("⚠️ API 키가 설정되지 않았습니다. `.env` 파일을 확인해주세요.")
     st.stop()
 
-# ─── 히스토리 유틸 ────────────────────────────────────────
+# ─── Firebase 헬퍼 ────────────────────────────────────────
+def _get_db():
+    from firebase_client import get_db
+    return get_db()
+
+# ─── 히스토리 유틸 (Firebase 전용) ───────────────────────
 def save_history(brief, category, budget_range, agent_opinions, debate_result, final_report, product_name=""):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     record = {
@@ -77,45 +81,52 @@ def save_history(brief, category, budget_range, agent_opinions, debate_result, f
         "final_report": final_report,
         "outcome": None,
         "learnings": "",
+        "_filename": f"{ts}.json",
     }
-    path = os.path.join(HISTORY_DIR, f"{ts}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(record, f, ensure_ascii=False, indent=2)
-    return path
+    try:
+        db = _get_db()
+        db.collection("ad_campaigns").document(ts).set(record)
+    except Exception as e:
+        st.warning(f"⚠️ 분석 기록 저장 실패: {e}")
+    return f"{ts}.json"
 
 def load_history_list():
-    files = sorted([f for f in os.listdir(HISTORY_DIR) if f.endswith(".json")], reverse=True)
-    records = []
-    for fname in files:
-        try:
-            with open(os.path.join(HISTORY_DIR, fname), encoding="utf-8") as f:
-                data = json.load(f)
-                data["_filename"] = fname
-                records.append(data)
-        except Exception:
-            pass
-    return records
+    try:
+        db = _get_db()
+        docs = db.collection("ad_campaigns").stream()
+        records = []
+        for doc in docs:
+            data = doc.to_dict()
+            if "_filename" not in data:
+                data["_filename"] = f"{doc.id}.json"
+            records.append(data)
+        records.sort(key=lambda x: x.get("_filename", ""), reverse=True)
+        return records
+    except Exception as e:
+        st.warning(f"⚠️ 분석 기록 로드 실패: {e}")
+        return []
 
-def update_history_outcome(filename, outcome, learnings):
-    path = os.path.join(HISTORY_DIR, filename)
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    data["outcome"] = outcome
-    data["learnings"] = learnings
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def update_history_outcome(doc_id, outcome, learnings):
+    doc_id = doc_id.replace(".json", "")
+    try:
+        db = _get_db()
+        db.collection("ad_campaigns").document(doc_id).update(
+            {"outcome": outcome, "learnings": learnings}
+        )
+    except Exception as e:
+        st.warning(f"⚠️ 피드백 저장 실패: {e}")
 
-def update_history_opinions(filename, agent_opinions, debate_result, final_report):
-    path = os.path.join(HISTORY_DIR, filename)
-    if not os.path.exists(path):
-        return
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    data["agent_opinions"] = agent_opinions
-    data["debate_result"] = debate_result
-    data["final_report"] = final_report
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def update_history_opinions(doc_id, agent_opinions, debate_result, final_report):
+    doc_id = doc_id.replace(".json", "")
+    try:
+        db = _get_db()
+        db.collection("ad_campaigns").document(doc_id).update({
+            "agent_opinions": agent_opinions,
+            "debate_result": debate_result,
+            "final_report": final_report,
+        })
+    except Exception as e:
+        st.warning(f"⚠️ 재분석 결과 업데이트 실패: {e}")
 
 def extract_summary(debate_result: str) -> str:
     """토론 결과에서 최종 합의 부분만 추출."""
@@ -129,6 +140,30 @@ def extract_summary(debate_result: str) -> str:
             summary_lines.append(line)
     return "\n".join(summary_lines) if summary_lines else debate_result
 
+# ─── 기존 로컬 파일 → Firebase 마이그레이션 (최초 1회) ──────
+def _migrate_local_to_firebase():
+    db = _get_db()
+    if not db:
+        return
+    if not os.path.exists(HISTORY_DIR):
+        return
+    files = [f for f in os.listdir(HISTORY_DIR) if f.endswith(".json")]
+    for fname in files:
+        doc_id = fname.replace(".json", "")
+        try:
+            # 이미 Firebase에 있으면 스킵
+            if db.collection("ad_campaigns").document(doc_id).get().exists:
+                continue
+            with open(os.path.join(HISTORY_DIR, fname), encoding="utf-8") as f:
+                data = json.load(f)
+            db.collection("ad_campaigns").document(doc_id).set(data)
+        except Exception:
+            pass
+
+if "migrated" not in st.session_state:
+    _migrate_local_to_firebase()
+    st.session_state["migrated"] = True
+
 # ─── 세션 상태 초기화 ─────────────────────────────────────
 defaults = {
     "view_history": None, "analysis_done": False,
@@ -136,6 +171,9 @@ defaults = {
     "saved_filename": "", "current_brief": "",
     "current_cat": "", "current_budget": "",
     "selected_agents": AGENT_NAMES, "current_product": "",
+    "revision_round": 1,       # 현재 라운드 (1부터 시작)
+    "show_revision_form": False,  # 수정 요청 폼 표시 여부
+    "show_final_form": False,     # 최종 결정 폼 표시 여부
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -348,10 +386,27 @@ if page == "📦 제품 관리":
 # ══════════════════════════════════════════════════════════
 elif page == "📂 분석 기록":
     if st.session_state.view_history:
-        path = os.path.join(HISTORY_DIR, st.session_state.view_history)
+        # Firebase 먼저 시도, 없으면 로컬 파일 fallback
+        rec = None
+        doc_id = st.session_state.view_history.replace(".json", "")
+        db = _get_db()
+        if db:
+            try:
+                doc = db.collection("ad_campaigns").document(doc_id).get()
+                if doc.exists:
+                    rec = doc.to_dict()
+            except Exception:
+                pass
+        if rec is None:
+            path = os.path.join(HISTORY_DIR, st.session_state.view_history)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    rec = json.load(f)
+            except Exception:
+                rec = None
         try:
-            with open(path, encoding="utf-8") as f:
-                rec = json.load(f)
+            if rec is None:
+                raise FileNotFoundError("기록을 찾을 수 없습니다.")
 
             st.title("📂 분석 기록 상세보기")
             st.caption(f"분석일시: {rec.get('date_display','')} | 카테고리: {rec.get('category','')} | 예산: {rec.get('budget_range','')}")
@@ -557,13 +612,18 @@ else:
                 final_brief += f"\n\n## 첨부 데이터 ({uploaded_file.name})\n{file_content}"
                 st.info(f"📎 '{uploaded_file.name}' 파일이 포함되었습니다.")
 
-        st.session_state.analysis_done   = False
-        st.session_state.agent_opinions  = {}
-        st.session_state.current_brief   = final_brief
-        st.session_state.current_cat     = category
-        st.session_state.current_budget  = budget_range
-        st.session_state.selected_agents = selected_agents
-        st.session_state.current_product = product_name
+        st.session_state.analysis_done      = False
+        st.session_state.agent_opinions     = {}
+        st.session_state.debate_result      = ""
+        st.session_state.final_report       = ""
+        st.session_state.current_brief      = final_brief
+        st.session_state.current_cat        = category
+        st.session_state.current_budget     = budget_range
+        st.session_state.selected_agents    = selected_agents
+        st.session_state.current_product    = product_name
+        st.session_state.revision_round     = 1
+        st.session_state.show_revision_form = False
+        st.session_state.show_final_form    = False
 
         st.markdown("---")
         st.header("2️⃣ 에이전트 독립 분석")
@@ -585,6 +645,16 @@ else:
                         st.error(f"분석 중 오류: {e}")
                         st.session_state.agent_opinions[name] = f"[오류: {e}]"
 
+        # ── 1차 저장: 토론 전에 에이전트 분석 결과 먼저 저장 ──
+        saved_id = save_history(
+            final_brief, category, budget_range,
+            st.session_state.agent_opinions,
+            "", "",  # 토론 결과는 아직 없음
+            product_name,
+        )
+        st.session_state.saved_filename = saved_id
+        st.session_state.analysis_done = True
+
         if len(selected_agents) >= 2:
             st.markdown("---")
             st.header("3️⃣ 에이전트 토론 및 합의")
@@ -594,181 +664,210 @@ else:
                     final_report  = generate_report(final_brief, debate_result, category, budget_range)
                     st.session_state.debate_result = debate_result
                     st.session_state.final_report  = final_report
-                    st.session_state.analysis_done = True
+                    # 토론 성공 → 저장된 기록에 토론 결과 업데이트
+                    update_history_opinions(saved_id, st.session_state.agent_opinions, debate_result, final_report)
                 except Exception as e:
-                    st.error(f"토론 중 오류: {e}")
-                    st.stop()
+                    st.error(f"토론 중 오류가 발생했습니다: {e}")
+                    st.warning("에이전트 분석 결과는 저장되었습니다. 토론 없이 계속 진행됩니다.")
 
-            result_tabs = st.tabs(["📋 최종 합의 (요약)", "📄 전체 토론 내용"])
-            with result_tabs[0]:
-                st.markdown(extract_summary(debate_result))
-            with result_tabs[1]:
-                st.markdown(debate_result)
+            if st.session_state.debate_result:
+                result_tabs = st.tabs(["📋 최종 합의 (요약)", "📄 전체 토론 내용"])
+                with result_tabs[0]:
+                    st.markdown(extract_summary(st.session_state.debate_result))
+                with result_tabs[1]:
+                    st.markdown(st.session_state.debate_result)
         else:
             only_opinion = list(st.session_state.agent_opinions.values())[0]
             final_report = generate_report(final_brief, only_opinion, category, budget_range)
             st.session_state.debate_result = only_opinion
             st.session_state.final_report  = final_report
-            st.session_state.analysis_done = True
+            update_history_opinions(saved_id, st.session_state.agent_opinions, only_opinion, final_report)
 
-        saved_path = save_history(
-            final_brief, category, budget_range,
-            st.session_state.agent_opinions,
-            st.session_state.debate_result,
-            st.session_state.final_report,
-            product_name,
-        )
-        st.session_state.saved_filename = os.path.basename(saved_path)
-        st.success("📂 분석 결과가 자동 저장되었습니다.")
+        st.success("📂 분석 결과가 저장되었습니다. (Firebase + 로컬 백업)")
 
-    # ── 분석 완료 후 UI ───────────────────────────────────
+    # ── 분석 완료 후 UI (라운드 기반) ───────────────────────
     if st.session_state.analysis_done:
         brief        = st.session_state.current_brief
         category     = st.session_state.current_cat
         budget_range = st.session_state.current_budget
         product_name = st.session_state.current_product
-
-        st.markdown("---")
-        st.header("🔄 에이전트별 심층 분석 요청")
-        st.caption("특정 에이전트에게 추가 요청을 보내 더 깊이 분석하게 할 수 있습니다.")
-
         active_agents = st.session_state.get("selected_agents", AGENT_NAMES)
-        sel_labels = [TAB_LABELS[AGENT_NAMES.index(n)] for n in active_agents]
-        tabs = st.tabs(sel_labels)
-        for i, name in enumerate(active_agents):
-            with tabs[i]:
-                st.markdown(st.session_state.agent_opinions.get(name, ""))
-                st.markdown("---")
-                add_req = st.text_area(
-                    "이 에이전트에게 추가 요청",
-                    key=f"req_{name}",
-                    placeholder="예: 예산을 50% 줄였을 때 전략 / 20대 타겟으로 수정 / 더 구체적인 수치로",
-                    height=80,
-                )
-                if st.button(f"🔄 {AGENT_DISPLAY_NAMES[name]} 재분석", key=f"btn_{name}", type="secondary"):
-                    if not add_req.strip():
-                        st.warning("추가 요청 내용을 입력해주세요.")
-                    else:
-                        with st.spinner(f"{AGENT_DISPLAY_NAMES[name]} 재분석 중..."):
-                            try:
-                                new_brief = f"{brief}\n\n## 추가 요청\n{add_req}"
-                                new_opinion = AGENT_MODULES[name].analyze(new_brief, category, budget_range)
-                                st.session_state.agent_opinions[name] = new_opinion
-                                st.success("✅ 재분석 완료!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"재분석 중 오류: {e}")
 
+        # ── 라운드 표시 ──────────────────────────────────
         st.markdown("---")
-        st.header("🔄 전체 에이전트 동시 재분석")
-        all_req = st.text_area(
-            "전체 에이전트에게 추가 지시",
-            key="req_all",
-            placeholder="예: 예산을 200만원으로 줄여서 다시 분석 / 타겟을 50대 남성으로 변경",
-            height=80,
-        )
-        if st.button("🚀 전체 재분석 + 토론 재실행", type="primary", use_container_width=True):
-            if not all_req.strip():
-                st.warning("추가 지시 내용을 입력해주세요.")
-            else:
-                new_brief = f"{brief}\n\n## 추가 지시 (전체)\n{all_req}"
-                new_opinions = {}
-                rtabs = st.tabs([TAB_LABELS[AGENT_NAMES.index(n)] for n in active_agents])
-                for i, name in enumerate(active_agents):
-                    with rtabs[i]:
-                        with st.spinner(f"{AGENT_DISPLAY_NAMES[name]} 재분석 중..."):
-                            try:
-                                op = AGENT_MODULES[name].analyze(new_brief, category, budget_range)
-                                st.markdown(op)
-                                new_opinions[name] = op
-                            except Exception as e:
-                                st.error(f"오류: {e}")
-                                new_opinions[name] = f"[오류: {e}]"
-                st.session_state.agent_opinions = new_opinions
-                with st.spinner("토론 진행 중..."):
-                    try:
-                        new_debate = run_debate(new_brief, new_opinions)
-                        new_report = generate_report(new_brief, new_debate, category, budget_range)
-                        st.session_state.debate_result = new_debate
-                        st.session_state.final_report  = new_report
-                    except Exception as e:
-                        st.error(f"토론 오류: {e}")
-                        st.stop()
+        rnd = st.session_state.revision_round
+        if rnd == 1:
+            st.info("📊 **1라운드** — 최초 분석 결과입니다. 수정하거나 채택하세요.")
+        else:
+            st.info(f"📊 **{rnd}라운드** — 수정 분석 결과입니다.")
 
-                result_tabs = st.tabs(["📋 최종 합의 (요약)", "📄 전체 토론 내용"])
-                with result_tabs[0]:
-                    st.markdown(extract_summary(new_debate))
-                with result_tabs[1]:
-                    st.markdown(new_debate)
+        # ── 에이전트별 분석 (접힌 상태) ──────────────────
+        with st.expander("🤖 에이전트별 분석 상세보기 / 개별 재요청", expanded=False):
+            sel_labels = [TAB_LABELS[AGENT_NAMES.index(n)] for n in active_agents]
+            atabs = st.tabs(sel_labels)
+            for i, name in enumerate(active_agents):
+                with atabs[i]:
+                    st.markdown(st.session_state.agent_opinions.get(name, ""))
+                    st.markdown("---")
+                    add_req = st.text_area(
+                        "이 에이전트에게만 추가 요청",
+                        key=f"req_{name}",
+                        placeholder="예: 예산을 50% 줄였을 때 전략 / 더 구체적인 수치로",
+                        height=70,
+                    )
+                    if st.button(f"🔄 {AGENT_DISPLAY_NAMES[name]} 단독 재분석", key=f"btn_{name}", type="secondary"):
+                        if not add_req.strip():
+                            st.warning("추가 요청 내용을 입력해주세요.")
+                        else:
+                            with st.spinner(f"{AGENT_DISPLAY_NAMES[name]} 재분석 중..."):
+                                try:
+                                    new_brief = f"{brief}\n\n## 추가 요청\n{add_req}"
+                                    new_opinion = AGENT_MODULES[name].analyze(new_brief, category, budget_range)
+                                    st.session_state.agent_opinions[name] = new_opinion
+                                    st.success("✅ 재분석 완료!")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"재분석 중 오류: {e}")
 
-                if st.session_state.saved_filename:
-                    update_history_opinions(st.session_state.saved_filename, new_opinions, new_debate, new_report)
-                    st.success("📂 재분석 결과가 기존 기록에 업데이트되었습니다.")
+        # ── 토론/합의 결과 ────────────────────────────────
+        if st.session_state.debate_result:
+            result_tabs = st.tabs(["📋 최종 합의 (요약)", "📄 전체 토론 내용"])
+            with result_tabs[0]:
+                st.markdown(extract_summary(st.session_state.debate_result))
+            with result_tabs[1]:
+                st.markdown(st.session_state.debate_result)
 
-        # ── 보고서 다운로드 + 피드백 ──────────────────────
-        st.markdown("---")
-        st.header("4️⃣ 최종 결정 및 피드백")
-        st.download_button(
-            label="📥 전략 보고서 다운로드 (.md)",
-            data=st.session_state.final_report.encode("utf-8"),
-            file_name=f"광고전략_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
-            mime="text/markdown",
-            use_container_width=True,
-        )
-
-        st.markdown("### 이 전략을 어떻게 평가하시나요?")
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            outcome = st.radio("평가", ["✅ 채택 (좋음)", "🔧 일부 수정 후 채택", "❌ 참고만 함"], label_visibility="collapsed")
-        with col2:
-            learnings = st.text_area(
-                "캠페인 진행 후 결과 메모",
-                placeholder="예: 인스타그램 릴스 ROAS 3.2 달성. 네이버 파워링크 클릭률 예상보다 낮았음.",
-                height=100,
+        # ── 보고서 다운로드 ───────────────────────────────
+        if st.session_state.final_report:
+            st.download_button(
+                label="📥 전략 보고서 다운로드 (.md)",
+                data=st.session_state.final_report.encode("utf-8"),
+                file_name=f"광고전략_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                mime="text/markdown",
             )
 
-        # 피드백 저장 시 실적 데이터도 함께 저장
-        if product_name:
-            st.markdown(f"**📊 '{product_name}' 실적 데이터 업데이트** (선택사항)")
-            pc1, pc2, pc3 = st.columns(3)
-            with pc1:
-                p_roas = st.number_input("ROAS", min_value=0.0, step=0.1, format="%.2f", key="p_roas")
-                p_cpc  = st.number_input("CPC (원)", min_value=0, step=10, key="p_cpc")
-            with pc2:
-                p_ctr  = st.number_input("CTR (%)", min_value=0.0, step=0.01, format="%.2f", key="p_ctr")
-                p_cvr  = st.number_input("전환율 (%)", min_value=0.0, step=0.01, format="%.2f", key="p_cvr")
-            with pc3:
-                p_cpa  = st.number_input("CPA (원)", min_value=0, step=100, key="p_cpa")
-                p_ch   = st.text_input("채널명", placeholder="예: 인스타그램 / 네이버 / 전체", key="p_ch")
+        # ── 판단 섹션 ─────────────────────────────────────
+        st.markdown("---")
+        st.subheader("이 전략을 어떻게 할까요?")
+        dc1, dc2 = st.columns(2)
+        with dc1:
+            if st.button("🔄 수정하여 재분석", use_container_width=True):
+                st.session_state.show_revision_form = True
+                st.session_state.show_final_form = False
+                st.rerun()
+        with dc2:
+            if st.button("✅ 이 전략 채택 / 최종 결정", type="primary", use_container_width=True):
+                st.session_state.show_final_form = True
+                st.session_state.show_revision_form = False
+                st.rerun()
 
-        if st.button("💾 피드백 저장 (에이전트 학습)", type="secondary", use_container_width=True):
-            omap = {"✅ 채택 (좋음)": "성공", "🔧 일부 수정 후 채택": "보통", "❌ 참고만 함": "실패"}
-            if st.session_state.saved_filename:
-                update_history_outcome(st.session_state.saved_filename, omap[outcome], learnings)
-            for name in AGENT_NAMES:
-                add_experience(name, {
-                    "summary": brief[:120], "category": category,
-                    "budget_range": budget_range, "channels": [], "learnings": learnings,
-                }, omap[outcome])
+        # ── 수정 요청 폼 ──────────────────────────────────
+        if st.session_state.show_revision_form:
+            st.markdown("---")
+            st.subheader(f"🔄 {rnd + 1}라운드 수정 방향 입력")
+            revision_req = st.text_area(
+                "어떻게 수정할까요?",
+                key="revision_req",
+                placeholder="예: 예산을 200만원으로 줄여서 / 타겟을 50대 남성으로 / SNS 비중을 높여서 / 네이버 중심으로",
+                height=100,
+            )
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                if st.button("🚀 전체 재분석 실행", type="primary", use_container_width=True):
+                    if not revision_req.strip():
+                        st.warning("수정 방향을 입력해주세요.")
+                    else:
+                        new_brief = f"{brief}\n\n## {rnd + 1}라운드 수정 지시\n{revision_req}"
+                        st.session_state.current_brief = new_brief
+                        new_opinions = {}
+                        rtabs = st.tabs([TAB_LABELS[AGENT_NAMES.index(n)] for n in active_agents])
+                        for i, name in enumerate(active_agents):
+                            with rtabs[i]:
+                                with st.spinner(f"{AGENT_DISPLAY_NAMES[name]} 재분석 중..."):
+                                    try:
+                                        op = AGENT_MODULES[name].analyze(new_brief, category, budget_range)
+                                        st.markdown(op)
+                                        new_opinions[name] = op
+                                    except Exception as e:
+                                        st.error(f"오류: {e}")
+                                        new_opinions[name] = f"[오류: {e}]"
+                        st.session_state.agent_opinions = new_opinions
+                        with st.spinner("토론 진행 중..."):
+                            try:
+                                new_debate = run_debate(new_brief, new_opinions)
+                                new_report = generate_report(new_brief, new_debate, category, budget_range)
+                                st.session_state.debate_result = new_debate
+                                st.session_state.final_report  = new_report
+                            except Exception as e:
+                                st.error(f"토론 오류: {e}")
+                        if st.session_state.saved_filename:
+                            update_history_opinions(
+                                st.session_state.saved_filename,
+                                new_opinions,
+                                st.session_state.debate_result,
+                                st.session_state.final_report,
+                            )
+                        st.session_state.revision_round += 1
+                        st.session_state.show_revision_form = False
+                        st.rerun()
+            with rc2:
+                if st.button("← 취소", use_container_width=True):
+                    st.session_state.show_revision_form = False
+                    st.rerun()
 
-            # 제품 프로필에 실적 + 인사이트 저장
+        # ── 최종 결정 폼 ──────────────────────────────────
+        if st.session_state.show_final_form:
+            st.markdown("---")
+            st.subheader("✅ 최종 결정 및 피드백")
+            st.caption(f"총 {rnd}라운드 수정 후 채택")
+            fc1, fc2 = st.columns([1, 2])
+            with fc1:
+                outcome = st.radio("평가", ["✅ 채택 (좋음)", "🔧 일부 수정 후 채택", "❌ 참고만 함"], label_visibility="collapsed")
+            with fc2:
+                learnings = st.text_area(
+                    "결과 메모",
+                    placeholder="예: 인스타 릴스 ROAS 3.2 달성. 네이버 파워링크 클릭률 예상보다 낮았음.",
+                    height=100,
+                )
             if product_name:
-                if p_roas > 0 or p_cpc > 0 or p_ctr > 0:
-                    add_performance_record(product_name, {
-                        "roas": p_roas if p_roas > 0 else None,
-                        "cpc": p_cpc if p_cpc > 0 else None,
-                        "ctr": p_ctr if p_ctr > 0 else None,
-                        "cvr": p_cvr if p_cvr > 0 else None,
-                        "cpa": p_cpa if p_cpa > 0 else None,
-                        "channel": p_ch.strip() if p_ch else None,
-                        "notes": learnings[:100] if learnings else None,
-                    })
-                if learnings:
-                    prof = load_product(product_name)
-                    existing = prof.get("insights", "")
-                    new_insight = f"[{datetime.now().strftime('%Y-%m')}] {learnings[:150]}"
-                    prof["insights"] = f"{existing}\n{new_insight}".strip() if existing else new_insight
-                    save_product(prof)
+                st.markdown(f"**📊 '{product_name}' 실적 데이터 업데이트** (선택사항)")
+                pc1, pc2, pc3 = st.columns(3)
+                with pc1:
+                    p_roas = st.number_input("ROAS", min_value=0.0, step=0.1, format="%.2f", key="p_roas")
+                    p_cpc  = st.number_input("CPC (원)", min_value=0, step=10, key="p_cpc")
+                with pc2:
+                    p_ctr  = st.number_input("CTR (%)", min_value=0.0, step=0.01, format="%.2f", key="p_ctr")
+                    p_cvr  = st.number_input("전환율 (%)", min_value=0.0, step=0.01, format="%.2f", key="p_cvr")
+                with pc3:
+                    p_cpa  = st.number_input("CPA (원)", min_value=0, step=100, key="p_cpa")
+                    p_ch   = st.text_input("채널명", placeholder="예: 인스타그램 / 네이버 / 전체", key="p_ch")
 
-            st.success("✅ 에이전트 메모리 + 제품 프로필에 저장되었습니다!")
-            st.balloons()
+            if st.button("💾 최종 저장 (에이전트 학습)", type="primary", use_container_width=True):
+                omap = {"✅ 채택 (좋음)": "성공", "🔧 일부 수정 후 채택": "보통", "❌ 참고만 함": "실패"}
+                if st.session_state.saved_filename:
+                    update_history_outcome(st.session_state.saved_filename, omap[outcome], learnings)
+                for name in AGENT_NAMES:
+                    add_experience(name, {
+                        "summary": brief[:120], "category": category,
+                        "budget_range": budget_range, "channels": [], "learnings": learnings,
+                    }, omap[outcome])
+                if product_name:
+                    if p_roas > 0 or p_cpc > 0 or p_ctr > 0:
+                        add_performance_record(product_name, {
+                            "roas": p_roas if p_roas > 0 else None,
+                            "cpc": p_cpc if p_cpc > 0 else None,
+                            "ctr": p_ctr if p_ctr > 0 else None,
+                            "cvr": p_cvr if p_cvr > 0 else None,
+                            "cpa": p_cpa if p_cpa > 0 else None,
+                            "channel": p_ch.strip() if p_ch else None,
+                            "notes": learnings[:100] if learnings else None,
+                        })
+                    if learnings:
+                        prof = load_product(product_name)
+                        existing = prof.get("insights", "")
+                        new_insight = f"[{datetime.now().strftime('%Y-%m')}] {learnings[:150]}"
+                        prof["insights"] = f"{existing}\n{new_insight}".strip() if existing else new_insight
+                        save_product(prof)
+                st.success("✅ 에이전트 메모리 + 제품 프로필에 저장되었습니다!")
+                st.session_state.show_final_form = False
+                st.balloons()
